@@ -1,7 +1,8 @@
 #include <algorithm>
 #include <boost/beast.hpp>
 #include <boost/log/trivial.hpp>
-#include <cstdlib>
+#include <cctype>
+#include <charconv>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -44,6 +45,171 @@ void playlist::on_initial_playlist_read(http_response *response)
 	}
 }
 
+void playlist::parse_hls_playlist(const std::vector<char>& response_body)
+{
+	std::string_view final_stream_information;
+	std::string_view stream_information;
+	std::string_view u;
+	const char *line_end;
+	const char *iter = response_body.data();
+	const char * const playlist_end = iter + response_body.size();
+	size_t bandwidth = 0;
+	size_t max_bandwidth = 0;
+	size_t segment_number = 0;
+	size_t sequence_number = 0;
+	size_t target_duration = 0;
+	bool end_list = false;
+	bool is_url = false;
+	bool master_playlist = true;
+
+	if (iter != playlist_end && *iter == line_feed)
+		iter++;
+
+	for (; iter < playlist_end; iter = line_end + 1) {
+		line_end = std::find(iter, playlist_end, line_feed);
+
+		const char * const e = line_end[-1] == carriage_return ? line_end - 1 : line_end;
+		const size_t line_len = e - iter;
+
+		if (!line_len) {
+			if (line_end == playlist_end)
+				break;
+
+			continue;
+		}
+
+		if (line_len > sizeof(TARGET_DURATION_TAG) - 1 &&
+		    std::equal(iter, iter + sizeof(TARGET_DURATION_TAG) - 1, TARGET_DURATION_TAG)) {
+			std::from_chars(iter + sizeof(TARGET_DURATION_TAG) - 1, e, target_duration);
+			master_playlist = false;
+		}
+		else if (line_len > sizeof(MEDIA_SEQUENCE_TAG) - 1 &&
+			 std::equal(
+			     iter, iter + sizeof(MEDIA_SEQUENCE_TAG) - 1, MEDIA_SEQUENCE_TAG))
+			std::from_chars(iter + sizeof(MEDIA_SEQUENCE_TAG) - 1, e, sequence_number);
+		else if (line_len >= sizeof(DISCONTINUITY_TAG) - 1 &&
+			 std::equal(iter, iter + sizeof(DISCONTINUITY_TAG) - 1, DISCONTINUITY_TAG))
+			BOOST_LOG_TRIVIAL(warning) << "Playlist discontinuity.";
+		else if (line_len >= sizeof(END_LIST_TAG) - 1 &&
+			 std::equal(iter, iter + sizeof(END_LIST_TAG) - 1, END_LIST_TAG))
+			end_list = true;
+		else if (line_len >= sizeof(PLAYLIST_TYPE_VOD_TAG) - 1 &&
+			 std::equal(
+			     iter, iter + sizeof(PLAYLIST_TYPE_VOD_TAG) - 1, PLAYLIST_TYPE_VOD_TAG))
+			end_list = true;
+		else if (line_len > sizeof(STREAM_INF_TAG) - 1 &&
+			 std::equal(iter, iter + sizeof(STREAM_INF_TAG) - 1, STREAM_INF_TAG)) {
+			bandwidth = 0;
+			stream_information =
+			    std::string_view {iter + sizeof(STREAM_INF_TAG) - 1,
+					      line_len + 1 - sizeof(STREAM_INF_TAG)};
+
+			auto bandwidth_pos =
+			    std::search(iter,
+					e,
+					BANDWIDTH_ATTRIBUTE,
+					&BANDWIDTH_ATTRIBUTE[sizeof(BANDWIDTH_ATTRIBUTE) - 1]);
+
+			if (bandwidth_pos != e) {
+				bandwidth_pos += sizeof(BANDWIDTH_ATTRIBUTE) - 1;
+
+				if (bandwidth_pos != e)
+					std::from_chars(bandwidth_pos, e, bandwidth);
+			}
+		}
+		else if (*iter != tag_begin) {
+			bool is_current_url =
+			    (line_len >= sizeof(HTTPS_PREFIX) - 1 &&
+			     std::equal(iter, iter + sizeof(HTTPS_PREFIX) - 1, HTTPS_PREFIX)) ||
+			    (line_len >= sizeof(HTTP_PREFIX) - 1 &&
+			     std::equal(iter, iter + sizeof(HTTP_PREFIX) - 1, HTTP_PREFIX));
+
+			if (master_playlist) {
+				if (bandwidth > max_bandwidth) {
+					max_bandwidth = bandwidth;
+					is_url = is_current_url;
+					final_stream_information = std::move(stream_information);
+					u = std::string_view {iter, line_len};
+				}
+			}
+			else if (is_current_url)
+				writer.add_segment(sequence_number,
+						   std::string_view {iter, line_len});
+			else if (*iter == resource_delimiter)
+				writer.add_segment(sequence_number,
+						   is_https,
+						   host,
+						   std::string_view {iter, line_len});
+			else {
+				std::string r {resource.substr(0, resource_prefix_len)};
+
+				r.append(iter, line_len);
+				writer.add_segment(sequence_number, is_https, host, r);
+			}
+
+			segment_number++;
+			sequence_number++;
+		}
+
+		if (line_end == playlist_end)
+			break;
+	}
+
+	sequence_number = sequence_number - segment_number;
+
+	if (master_playlist) {
+		BOOST_LOG_TRIVIAL(trace) << "Received master playlist with stream information: "
+					 << final_stream_information;
+
+		if (is_url)
+			url = u;
+		else if (u[0] == resource_delimiter) {
+			const std::string::size_type offset =
+			    (is_https ? sizeof(HTTPS_PREFIX) : sizeof(HTTP_PREFIX)) - 1;
+
+			url.resize(url.find(resource_delimiter, offset));
+			url.append(u);
+		}
+		else {
+			url.resize(url.rfind(resource_delimiter, url.find(query_delimiter)) + 1);
+			url.append(u);
+		}
+
+		if (connection_pool::parse_url(url, &is_https, &host, &resource)) {
+			BOOST_LOG_TRIVIAL(trace) << "Media playlist URL: " << url;
+			resource_prefix_len =
+			    resource.rfind(resource_delimiter, resource.find(query_delimiter)) + 1;
+			pool->get(is_https,
+				  host,
+				  resource,
+				  std::bind(&playlist::on_initial_playlist_read,
+					    this,
+					    std::placeholders::_1),
+				  std::bind(&playlist::on_error, this));
+		}
+		else
+			BOOST_LOG_TRIVIAL(error) << "Invalid playlist URL: " << url;
+	}
+	else if (end_list) {
+		BOOST_LOG_TRIVIAL(trace)
+		    << "Received final playlist: sequence number = " << sequence_number
+		    << " segments = " << segment_number;
+		target_duration = 0;
+	}
+	else {
+		BOOST_LOG_TRIVIAL(trace)
+		    << "Received playlist: target duration = " << target_duration
+		    << " sequence number = " << sequence_number << " segments = " << segment_number;
+
+		if (target_duration > 1)
+			target_duration--;
+		else
+			target_duration = 1;
+	}
+
+	period = target_duration;
+}
+
 void playlist::parse_playlist(http_response *response)
 {
 	if (response->result() != http::status::ok) {
@@ -51,190 +217,20 @@ void playlist::parse_playlist(http_response *response)
 		    << "Invalid " << response->result_int() << " response: " << url;
 		on_error();
 	}
-	else if (response->base()[http::field::content_type] != hls_content_type) {
-		BOOST_LOG_TRIVIAL(error)
-		    << "Invalid content type: " << response->base()[http::field::content_type]
-		    << " URL: " << url;
-		on_error();
-	}
 	else {
-		std::string_view final_stream_information;
-		std::string_view stream_information;
-		std::string_view u;
-		const char *line_end;
-		const char *iter = response->body().data();
-		const char * const playlist_end = iter + response->body().size();
-		size_t bandwidth = 0;
-		size_t max_bandwidth = 0;
-		size_t segment_number = 0;
-		size_t sequence_number = 0;
-		size_t target_duration = 0;
-		bool end_list = false;
-		bool is_url = false;
-		bool master_playlist = true;
+		const auto& content_type = response->base()[http::field::content_type];
 
-		if (iter != playlist_end && *iter == line_feed)
-			iter++;
-
-		for (; iter < playlist_end; iter = line_end + 1) {
-			line_end = std::find(iter, playlist_end, line_feed);
-
-			const char * const e =
-			    line_end[-1] == carriage_return ? line_end - 1 : line_end;
-			const size_t line_len = e - iter;
-
-			if (!line_len) {
-				if (line_end == playlist_end)
-					break;
-
-				continue;
-			}
-
-			if (e != playlist_end && line_len > sizeof(TARGET_DURATION_TAG) - 1 &&
-			    std::equal(iter,
-				       iter + sizeof(TARGET_DURATION_TAG) - 1,
-				       TARGET_DURATION_TAG)) {
-				target_duration = static_cast<size_t>(
-				    std::atoll(iter + sizeof(TARGET_DURATION_TAG) - 1));
-				master_playlist = false;
-			}
-			else if (e != playlist_end && line_len > sizeof(MEDIA_SEQUENCE_TAG) - 1 &&
-				 std::equal(iter,
-					    iter + sizeof(MEDIA_SEQUENCE_TAG) - 1,
-					    MEDIA_SEQUENCE_TAG))
-				static_cast<size_t>(sequence_number = std::atoll(
-							iter + sizeof(MEDIA_SEQUENCE_TAG) - 1));
-			else if (line_len >= sizeof(DISCONTINUITY_TAG) - 1 &&
-				 std::equal(
-				     iter, iter + sizeof(DISCONTINUITY_TAG) - 1, DISCONTINUITY_TAG))
-				BOOST_LOG_TRIVIAL(warning) << "Playlist discontinuity.";
-			else if (line_len >= sizeof(END_LIST_TAG) - 1 &&
-				 std::equal(iter, iter + sizeof(END_LIST_TAG) - 1, END_LIST_TAG))
-				end_list = true;
-			else if (line_len >= sizeof(PLAYLIST_TYPE_VOD_TAG) - 1 &&
-				 std::equal(iter,
-					    iter + sizeof(PLAYLIST_TYPE_VOD_TAG) - 1,
-					    PLAYLIST_TYPE_VOD_TAG))
-				end_list = true;
-			else if (line_len > sizeof(STREAM_INF_TAG) - 1 &&
-				 std::equal(
-				     iter, iter + sizeof(STREAM_INF_TAG) - 1, STREAM_INF_TAG)) {
-				stream_information =
-				    std::string_view {iter + sizeof(STREAM_INF_TAG) - 1,
-						      line_len + 1 - sizeof(STREAM_INF_TAG)};
-
-				auto bandwidth_pos = std::search(
-				    iter,
-				    e,
-				    BANDWIDTH_ATTRIBUTE,
-				    &BANDWIDTH_ATTRIBUTE[sizeof(BANDWIDTH_ATTRIBUTE) - 1]);
-
-				if (bandwidth_pos == e)
-					bandwidth = 0;
-				else {
-					bandwidth_pos += sizeof(BANDWIDTH_ATTRIBUTE) - 1;
-					bandwidth =
-					    bandwidth_pos == e
-						? 0
-						: static_cast<size_t>(std::atoll(bandwidth_pos));
-				}
-			}
-			else if (*iter != tag_begin) {
-				bool is_current_url = false;
-
-				if (line_len >= sizeof(HTTPS_PREFIX) - 1 &&
-				    std::equal(iter, iter + sizeof(HTTPS_PREFIX) - 1, HTTPS_PREFIX))
-					is_current_url = true;
-				else if (line_len >= sizeof(HTTP_PREFIX) - 1 &&
-					 std::equal(
-					     iter, iter + sizeof(HTTP_PREFIX) - 1, HTTP_PREFIX))
-					is_current_url = true;
-
-				if (master_playlist) {
-					if (bandwidth > max_bandwidth) {
-						max_bandwidth = bandwidth;
-						is_url = is_current_url;
-						final_stream_information =
-						    std::move(stream_information);
-						u = std::string_view {iter, line_len};
-					}
-				}
-				else if (is_current_url)
-					writer.add_segment(sequence_number,
-							   std::string_view {iter, line_len});
-				else if (*iter == resource_delimiter)
-					writer.add_segment(sequence_number,
-							   is_https,
-							   host,
-							   std::string_view {iter, line_len});
-				else {
-					std::string r {resource.substr(0, resource_prefix_len)};
-
-					r.append(iter, line_len);
-					writer.add_segment(sequence_number, is_https, host, r);
-				}
-
-				segment_number++;
-				sequence_number++;
-			}
-
-			if (line_end == playlist_end)
-				break;
-		}
-
-		sequence_number = sequence_number - segment_number;
-
-		if (master_playlist) {
-			BOOST_LOG_TRIVIAL(trace)
-			    << "Received master playlist with stream information: "
-			    << final_stream_information;
-
-			if (is_url)
-				url = u;
-			else if (u[0] == resource_delimiter) {
-				const std::string::size_type offset =
-				    (is_https ? sizeof(HTTPS_PREFIX) : sizeof(HTTP_PREFIX)) - 1;
-
-				url.resize(url.find(resource_delimiter, offset));
-				url.append(u);
-			}
-			else {
-				url.resize(
-				    url.rfind(resource_delimiter, url.find(query_delimiter)) + 1);
-				url.append(u);
-			}
-
-			if (connection_pool::parse_url(url, &is_https, &host, &resource)) {
-				resource_prefix_len =
-				    resource.rfind(resource_delimiter,
-						   resource.find(query_delimiter)) +
-				    1;
-				pool->get(is_https,
-					  host,
-					  resource,
-					  std::bind(&playlist::on_initial_playlist_read,
-						    this,
-						    std::placeholders::_1),
-					  std::bind(&playlist::on_error, this));
-			}
-			else
-				BOOST_LOG_TRIVIAL(error) << "Invalid playlist URL: " << url;
-		}
-		else if (end_list) {
-			BOOST_LOG_TRIVIAL(trace)
-			    << "Received final playlist: sequence number = " << sequence_number
-			    << " segments = " << segment_number;
-			target_duration = 0;
-		}
+		if (content_type.size() == hls_content_type.size() &&
+		    std::equal(content_type.begin(),
+			       content_type.end(),
+			       hls_content_type.begin(),
+			       [](const auto& x, const auto& y) { return std::tolower(x) == y; }))
+			parse_hls_playlist(response->body());
 		else {
-			BOOST_LOG_TRIVIAL(trace)
-			    << "Received playlist: target duration = " << target_duration
-			    << " sequence number = " << sequence_number
-			    << " segments = " << segment_number;
-			target_duration = std::max(target_duration / 2, static_cast<size_t>(1));
+			BOOST_LOG_TRIVIAL(error)
+			    << "Invalid content type: " << content_type << " URL: " << url;
+			on_error();
 		}
-
-		period = target_duration;
 	}
 }
 

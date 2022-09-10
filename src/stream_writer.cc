@@ -18,7 +18,8 @@ void stream_writer::add_segment(size_t sequence_number,
 				const std::string_view& host,
 				const std::string_view& resource)
 {
-	if (sequence_number > last_downloaded_sequence_number) {
+	if (sequence_number > last_downloaded_sequence_number || first_segment) {
+		first_segment = false;
 		last_downloaded_sequence_number = sequence_number;
 		segments_in_progress.insert(sequence_number);
 		pool->get(is_https,
@@ -34,7 +35,8 @@ void stream_writer::add_segment(size_t sequence_number,
 
 void stream_writer::add_segment(size_t sequence_number, const std::string_view& url)
 {
-	if (sequence_number > last_downloaded_sequence_number) {
+	if (sequence_number > last_downloaded_sequence_number || first_segment) {
+		first_segment = false;
 		last_downloaded_sequence_number = sequence_number;
 		segments_in_progress.insert(sequence_number);
 

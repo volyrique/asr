@@ -25,6 +25,7 @@ class playlist {
 
 		void on_error() noexcept;
 		void on_initial_playlist_read(http_response *response);
+		void parse_hls_playlist(const std::vector<char>& response_body);
 		void parse_playlist(http_response *response);
 		void timer_handler(const boost::system::error_code& ec);
 

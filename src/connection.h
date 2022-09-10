@@ -41,7 +41,7 @@ class connection : public std::enable_shared_from_this<connection> {
 		on_read_callback on_read_cb;
 		http::request<http::empty_body> request;
 		http_response response;
-		tcp::resolver * const resolver;
+		tcp::resolver * const resolver = nullptr;
 		size_t sequence_number = 0;
 		bool connected = false;
 
@@ -131,7 +131,7 @@ class connection : public std::enable_shared_from_this<connection> {
 	protected:
 		std::string host;
 		on_error_callback on_error;
-		std::string_view::size_type port_pos;
+		std::string_view::size_type port_pos = 0;
 
 		connection(size_t sequence_number,
 			   const std::string_view& h,
@@ -196,7 +196,7 @@ class connection : public std::enable_shared_from_this<connection> {
 			if (connected)
 				async_write();
 			else {
-				const std::string_view h = host;
+				const std::string_view h {host};
 
 				resolver->async_resolve(
 				    h.substr(0, port_pos),

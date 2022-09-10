@@ -13,7 +13,8 @@ is passed to the program, the stream with the highest bandwidth is chosen.
 
 To build `asr`, the minimum software version requirements are CMake 3.18.0,
 Boost 1.80.0, OpenSSL 3.0.0, and a C++17 compiler. In addition, liburing 2.1
-is required on Linux.
+is required on Linux, while on Windows Boost must be compiled with the
+`_WIN32_WINNT` macro set to `0x0A00`.
 
 The runtime operating system requirements are Linux 5.15, macOS 12.5 (Monterey),
 or Windows 11.

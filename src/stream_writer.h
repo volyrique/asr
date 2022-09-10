@@ -36,6 +36,7 @@ class stream_writer {
 		size_t last_downloaded_sequence_number = 0;
 		size_t last_written_sequence_number = 0;
 		connection_pool * const pool = nullptr;
+		bool first_segment = true;
 		bool write_in_progress = false;
 
 		void on_segment_error(size_t sequence_number);
