@@ -7,6 +7,11 @@ streaming protocols.
 At the moment only HTTP Live Streaming (HLS) is supported. If a master playlist
 is passed to the program, the stream with the highest bandwidth is chosen.
 
+`asr` is a simple alternative to a FFmpeg command line such as:
+```
+ffmpeg -i <URL> -c copy <output file>
+```
+
 ## Getting Started
 
 ### Prerequisites

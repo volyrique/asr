@@ -26,30 +26,38 @@ class stream_writer {
 		typedef asio::stream_file output_file;
 #endif // __APPLE__
 
+		std::vector<char> media_initialization_section;
 		output_file output;
 		std::priority_queue<media_segment,
 				    std::deque<media_segment>,
 				    std::greater<media_segment>>
 		    segments;
 		std::set<size_t> segments_in_progress;
-		asio::io_context * const io = nullptr;
 		size_t last_downloaded_sequence_number = 0;
 		size_t last_written_sequence_number = 0;
 		connection_pool * const pool = nullptr;
 		bool first_segment = true;
 		bool write_in_progress = false;
 
+		void media_initialization_section_write_handler(const boost::system::error_code& ec,
+								size_t size);
+		void on_media_initialization_section_error();
+		void on_media_initialization_section_receive(http_response *response);
 		void on_segment_error(size_t sequence_number);
-		void on_segment_read(size_t sequence_number, http_response *response);
+		void on_segment_receive(size_t sequence_number, http_response *response);
 		void write_handler(const boost::system::error_code& ec, size_t size);
 		void write_segment();
 
 	public:
 		stream_writer(asio::io_context *io_ctx, connection_pool *pool) :
-		    output(*io_ctx), io(io_ctx), pool(pool)
+		    media_initialization_section(0), output(*io_ctx), pool(pool)
 		{
 		}
 
+		void add_media_initialization_section(bool is_https,
+						      const std::string_view& host,
+						      const std::string_view& resource);
+		void add_media_initialization_section(const std::string_view& url);
 		void add_segment(size_t sequence_number,
 				 bool is_https,
 				 const std::string_view& host,

@@ -14,12 +14,12 @@
 #define BANDWIDTH_ATTRIBUTE "BANDWIDTH="
 #define DISCONTINUITY_TAG "#EXT-X-DISCONTINUITY"
 #define END_LIST_TAG "#EXT-X-ENDLIST"
-#define HTTP_PREFIX HTTP_PROTOCOL PROTOCOL_END
-#define HTTPS_PREFIX HTTPS_PROTOCOL PROTOCOL_END
+#define MAP_TAG "#EXT-X-MAP:"
 #define MEDIA_SEQUENCE_TAG "#EXT-X-MEDIA-SEQUENCE:"
 #define PLAYLIST_TYPE_VOD_TAG "#EXT-X-PLAYLIST-TYPE:VOD"
 #define STREAM_INF_TAG "#EXT-X-STREAM-INF:"
 #define TARGET_DURATION_TAG "#EXT-X-TARGETDURATION:"
+#define URI_ATTRIBUTE "URI=\""
 
 static const char carriage_return = '\r';
 static const char extension_delimiter = '.';
@@ -29,13 +29,22 @@ static const size_t max_file_name_length = 32;
 static const char query_delimiter = '?';
 static const char tag_begin = '#';
 static const std::string transport_stream_extension = ".ts";
+static const char uri_delimiter = '"';
+
+static bool is_url(const char *p, size_t len)
+{
+	return (len >= sizeof(HTTPS_PREFIX) - 1 &&
+		std::equal(p, p + sizeof(HTTPS_PREFIX) - 1, HTTPS_PREFIX)) ||
+	       (len >= sizeof(HTTP_PREFIX) - 1 &&
+		std::equal(p, p + sizeof(HTTP_PREFIX) - 1, HTTP_PREFIX));
+}
 
 void playlist::on_error() noexcept
 {
 	period = 0;
 }
 
-void playlist::on_initial_playlist_read(http_response *response)
+void playlist::on_initial_playlist_receive(http_response *response)
 {
 	parse_playlist(response);
 
@@ -59,9 +68,11 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 	size_t sequence_number = 0;
 	size_t target_duration = 0;
 	bool end_list = false;
-	bool is_url = false;
+	bool is_line_url = false;
 	bool master_playlist = true;
 
+	// In case we have to deal with an empty line later, make sure that we can look at least one
+	// character back.
 	if (iter != playlist_end && *iter == line_feed)
 		iter++;
 
@@ -97,6 +108,40 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 			 std::equal(
 			     iter, iter + sizeof(PLAYLIST_TYPE_VOD_TAG) - 1, PLAYLIST_TYPE_VOD_TAG))
 			end_list = true;
+		else if (line_len > sizeof(MAP_TAG) - 1 &&
+			 std::equal(iter, iter + sizeof(MAP_TAG) - 1, MAP_TAG)) {
+			auto uri_pos = std::search(iter + sizeof(MAP_TAG) - 1,
+						   e,
+						   URI_ATTRIBUTE,
+						   &URI_ATTRIBUTE[sizeof(URI_ATTRIBUTE) - 1]);
+
+			if (uri_pos != e) {
+				uri_pos += sizeof(URI_ATTRIBUTE) - 1;
+
+				const auto uri_end = std::find(uri_pos, e, uri_delimiter);
+
+				if (uri_end != e) {
+					const size_t uri_len = uri_end - uri_pos;
+
+					if (is_url(uri_pos, uri_len))
+						writer.add_media_initialization_section(
+						    std::string_view {uri_pos, uri_len});
+					else if (*uri_pos == resource_delimiter)
+						writer.add_media_initialization_section(
+						    is_https,
+						    host,
+						    std::string_view {uri_pos, uri_len});
+					else {
+						std::string r {
+						    resource.substr(0, resource_prefix_len)};
+
+						r.append(uri_pos, uri_len);
+						writer.add_media_initialization_section(
+						    is_https, host, r);
+					}
+				}
+			}
+		}
 		else if (line_len > sizeof(STREAM_INF_TAG) - 1 &&
 			 std::equal(iter, iter + sizeof(STREAM_INF_TAG) - 1, STREAM_INF_TAG)) {
 			bandwidth = 0;
@@ -118,21 +163,17 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 			}
 		}
 		else if (*iter != tag_begin) {
-			bool is_current_url =
-			    (line_len >= sizeof(HTTPS_PREFIX) - 1 &&
-			     std::equal(iter, iter + sizeof(HTTPS_PREFIX) - 1, HTTPS_PREFIX)) ||
-			    (line_len >= sizeof(HTTP_PREFIX) - 1 &&
-			     std::equal(iter, iter + sizeof(HTTP_PREFIX) - 1, HTTP_PREFIX));
+			const bool is_current_line_url = is_url(iter, line_len);
 
 			if (master_playlist) {
 				if (bandwidth > max_bandwidth) {
 					max_bandwidth = bandwidth;
-					is_url = is_current_url;
+					is_line_url = is_current_line_url;
 					final_stream_information = std::move(stream_information);
 					u = std::string_view {iter, line_len};
 				}
 			}
-			else if (is_current_url)
+			else if (is_current_line_url)
 				writer.add_segment(sequence_number,
 						   std::string_view {iter, line_len});
 			else if (*iter == resource_delimiter)
@@ -160,8 +201,9 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 	if (master_playlist) {
 		BOOST_LOG_TRIVIAL(trace) << "Received master playlist with stream information: "
 					 << final_stream_information;
+		target_duration = 0;
 
-		if (is_url)
+		if (is_line_url)
 			url = u;
 		else if (u[0] == resource_delimiter) {
 			const std::string::size_type offset =
@@ -182,7 +224,7 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 			pool->get(is_https,
 				  host,
 				  resource,
-				  std::bind(&playlist::on_initial_playlist_read,
+				  std::bind(&playlist::on_initial_playlist_receive,
 					    this,
 					    std::placeholders::_1),
 				  std::bind(&playlist::on_error, this));
@@ -202,7 +244,7 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 		    << " sequence number = " << sequence_number << " segments = " << segment_number;
 
 		if (target_duration > 1)
-			target_duration--;
+			target_duration = target_duration / 2;
 		else
 			target_duration = 1;
 	}
@@ -212,12 +254,7 @@ void playlist::parse_hls_playlist(const std::vector<char>& response_body)
 
 void playlist::parse_playlist(http_response *response)
 {
-	if (response->result() != http::status::ok) {
-		BOOST_LOG_TRIVIAL(error)
-		    << "Invalid " << response->result_int() << " response: " << url;
-		on_error();
-	}
-	else {
+	if (response->result() == http::status::ok) {
 		const auto& content_type = response->base()[http::field::content_type];
 
 		if (content_type.size() == hls_content_type.size() &&
@@ -231,6 +268,11 @@ void playlist::parse_playlist(http_response *response)
 			    << "Invalid content type: " << content_type << " URL: " << url;
 			on_error();
 		}
+	}
+	else {
+		BOOST_LOG_TRIVIAL(error)
+		    << "Invalid " << response->result_int() << " response: " << url;
+		on_error();
 	}
 }
 
@@ -260,7 +302,7 @@ bool playlist::record(const std::string_view& u)
 				pool->get(is_https,
 					  host,
 					  resource,
-					  std::bind(&playlist::on_initial_playlist_read,
+					  std::bind(&playlist::on_initial_playlist_receive,
 						    this,
 						    std::placeholders::_1),
 					  std::bind(&playlist::on_error, this));

@@ -34,11 +34,11 @@ class connection : public std::enable_shared_from_this<connection> {
 		typedef http::response<http::vector_body<char>> http_response;
 		typedef std::function<void(const std::string&)> on_error_callback;
 		typedef std::function<void(const std::shared_ptr<connection>&, http_response *)>
-		    on_read_callback;
+		    on_receive_callback;
 
 	private:
 		beast::flat_buffer buffer;
-		on_read_callback on_read_cb;
+		on_receive_callback on_receive_cb;
 		http::request<http::empty_body> request;
 		http_response response;
 		tcp::resolver * const resolver = nullptr;
@@ -71,7 +71,8 @@ class connection : public std::enable_shared_from_this<connection> {
 		void on_connect(beast::error_code ec, tcp::resolver::results_type::endpoint_type)
 		{
 			if (ec) {
-				BOOST_LOG_TRIVIAL(error) << "Unable to connect to: " << host;
+				BOOST_LOG_TRIVIAL(error) << "Failed to connect to: " << host
+							 << " Error code: " << ec.what();
 				on_error(host);
 			}
 			else
@@ -83,13 +84,14 @@ class connection : public std::enable_shared_from_this<connection> {
 			if (ec)
 				on_error(host);
 			else
-				on_read_cb(shared_from_this(), &response);
+				on_receive_cb(shared_from_this(), &response);
 		}
 
 		void on_resolve(beast::error_code ec, tcp::resolver::results_type results)
 		{
 			if (ec) {
-				BOOST_LOG_TRIVIAL(error) << "Unable to resolve: " << host;
+				BOOST_LOG_TRIVIAL(error) << "Failed to resolve: " << host
+							 << " Error code: " << ec.what();
 				on_error(host);
 			}
 			else {
@@ -107,7 +109,7 @@ class connection : public std::enable_shared_from_this<connection> {
 				}
 				else {
 					BOOST_LOG_TRIVIAL(error)
-					    << "Unable to connect to: " << host;
+					    << "Failed to connect to: " << host;
 					on_error(host);
 				}
 			}
@@ -118,7 +120,7 @@ class connection : public std::enable_shared_from_this<connection> {
 			if (ec)
 				on_error(host);
 			else {
-				response = http::response<http::vector_body<char>>();
+				response = http::response<http::vector_body<char>> {};
 				async_read();
 			}
 		}
@@ -185,13 +187,13 @@ class connection : public std::enable_shared_from_this<connection> {
 
 	public:
 		void get(const std::string_view& resource,
-			 on_read_callback&& on_read_fn,
+			 on_receive_callback&& on_receive_fn,
 			 on_error_callback&& on_error_cb)
 		{
 			request.method(http::verb::get);
 			request.target(resource);
 			on_error = std::move(on_error_cb);
-			on_read_cb = std::move(on_read_fn);
+			on_receive_cb = std::move(on_receive_fn);
 
 			if (connected)
 				async_write();
@@ -259,7 +261,8 @@ class https_connection : public virtual connection {
 		void on_handshake(beast::error_code ec)
 		{
 			if (ec) {
-				BOOST_LOG_TRIVIAL(error) << "Failed TLS handshake with: " << host;
+				BOOST_LOG_TRIVIAL(error) << "Failed TLS handshake with: " << host
+							 << " Error code: " << ec.what();
 				on_error(host);
 			}
 			else

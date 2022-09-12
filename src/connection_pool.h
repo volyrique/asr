@@ -21,6 +21,8 @@ namespace ssl = asio::ssl;
 #define HTTP_PROTOCOL "http"
 #define HTTPS_PROTOCOL "https"
 #define PROTOCOL_END "://"
+#define HTTP_PREFIX HTTP_PROTOCOL PROTOCOL_END
+#define HTTPS_PREFIX HTTPS_PROTOCOL PROTOCOL_END
 
 static const char resource_delimiter = '/';
 
@@ -46,7 +48,7 @@ class connection_pool {
 
 	public:
 		typedef std::function<void(void)> on_error_callback;
-		typedef std::function<void(http_response *)> on_read_callback;
+		typedef std::function<void(http_response *)> on_receive_callback;
 
 		connection_pool(asio::io_context *io_ctx) :
 		    resolver(*io_ctx), tls_context(ssl::context::tlsv12_client), io(io_ctx)
@@ -58,17 +60,17 @@ class connection_pool {
 
 			if (ec)
 				BOOST_LOG_TRIVIAL(error)
-				    << "Unable to set the default paths for TLS verification.";
+				    << "Failed to set the default paths for TLS verification.";
 		}
 
 		void get(bool is_https,
 			 const std::string_view& host,
 			 const std::string_view& resource,
-			 const on_read_callback& on_read,
+			 const on_receive_callback& on_receive,
 			 const on_error_callback& on_error,
 			 size_t retry_number = 0);
 		bool get(const std::string_view& url,
-			 const on_read_callback& on_read,
+			 const on_receive_callback& on_receive,
 			 const on_error_callback& on_error,
 			 size_t retry_number = 0);
 
