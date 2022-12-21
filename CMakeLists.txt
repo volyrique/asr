@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.18.0)
+"_$/"
+"_$/ "cmake_minimum_required(VERSION 3.18.0)"
 project(asr)
 find_path(BOOST_INCLUDE boost/beast.hpp REQUIRED)
 find_path(OPENSSL_INCLUDE openssl/ssl.h REQUIRED)
