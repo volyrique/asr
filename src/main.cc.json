@@ -8,12 +8,12 @@
 './_$_""
 #include "connection_pool.h"
 #include "playlist.h"
+"_$/"
+"_$/""int" main(int argc, char *argv[])
+{"_$"
+	int" ret = EXIT_FAILURE;
 
-int main(int argc, char *argv[])
-{
-	int ret = EXIT_FAILURE;
-
-	if (argc < 2) {
+	if ("argc < 2) {"_$/"
 		BOOST_LOG_TRIVIAL(info) << "Usage: " << *argv << " <playlist URL>";
 		return EXIT_SUCCESS;
 	}
